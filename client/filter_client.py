@@ -39,7 +39,7 @@ class FilterClient:
         self.client_id = config["client_id"]
         self.token = config["token"]
         self.timeout = config["check_timeout_seconds"]
-        self.tls_context = self.create_tls_context(config["server_cert"])
+        self.tls_context = self.create_tls_context(config["server_cert"], config.get("tls_keylog_file"))
 
         self.lock = threading.Lock()  # Only one question at a time on the socket.
         self.tls_socket = None        # None means "not connected".
@@ -47,17 +47,22 @@ class FilterClient:
         self.next_request_id = 1
         self.last_failure_time = 0    # When the last connection attempt failed.
 
-    def create_tls_context(self, server_cert_file):
+    def create_tls_context(self, server_cert_file, keylog_file):
         """
         Prepare the TLS settings for the client side.
         - Only TLS 1.3, with X25519 Diffie-Hellman key exchange (see common/tls_settings.py).
         - We trust ONLY our own server's certificate (server.crt). This is called "pinning".
           Diffie-Hellman alone does not stop a man-in-the-middle; checking the certificate does.
         - check_hostname is on: the certificate must contain the server's IP / name.
+        - keylog_file (optional, ONLY for the Wireshark demo): saves the session keys to a
+          file so Wireshark can decrypt our own traffic. Never use it in real use.
         """
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies certificates by default
         use_diffie_hellman(context)
         context.load_verify_locations(cafile=server_cert_file)
+        if keylog_file:
+            context.keylog_filename = keylog_file
+            logger.warning("DEMO MODE: TLS keys are saved to %s (for Wireshark only)", keylog_file)
         return context
 
     def connect(self):

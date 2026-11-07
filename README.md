@@ -106,6 +106,10 @@ curl -x http://127.0.0.1:8080 http://neverssl.com
 python -m unittest discover tests
 ```
 
+The full test plan, the two-computer guide and how to show the encryption in Wireshark
+are in [docs/TESTING.md](docs/TESTING.md). A ready-made capture to open in Wireshark is in
+[docs/wireshark](docs/wireshark).
+
 ## Project files
 
 | Folder / file | What's inside |
@@ -117,5 +121,6 @@ python -m unittest discover tests
 | `config/` | Example settings (`*.example.json`). The real ones are not in git (they contain tokens). |
 | `data/blacklist.txt` | The blocklist |
 | `scripts/make_cert.sh` | Creates the server certificate |
+| `tools/capture_tap.py` | Demo tool: records connection B into a file Wireshark can open |
 | `tests/` | Automatic tests |
 | `docs/` | Architecture and plan |

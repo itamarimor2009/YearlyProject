@@ -110,8 +110,13 @@ Phase 1 code was written directly (not through Paperclip tickets). Tested on one
 | 3. Every check in `access_log` | ✅ tested (`python run_server.py logs`) |
 | 4. Server down → block all, recovers without restarting client | ✅ tested |
 | 5. Wrong token refused and logged | ✅ tested |
-| 6. Wireshark shows TLS 1.3 with Diffie-Hellman `key_share` | ⏳ to do — logs already show `TLSv1.3, key exchange x25519` |
-| Two different computers on the same network | ⏳ to do |
+| 6. Wireshark shows TLS 1.3 with Diffie-Hellman `key_share` | ✅ recorded with `tools/capture_tap.py` → `docs/wireshark/` (Client/Server Hello key_share = x25519, then only Application Data) |
+| Server reached over the network IP (10.0.0.24), certificate for that IP | ✅ tested (same Mac; the client used the network address, not 127.0.0.1) |
+| Two physically different computers | ⏳ for the student to do with the guide in [TESTING.md](TESTING.md), section 3 |
+| Security review | ✅ done — added login timeout, max clients, safe logging of client text |
+| Presentation | ✅ slide deck (see the project's chat / artifacts) |
+
+**Phase 1 is complete.** Phase 2 continues on the `phase-2` branch, run by the Paperclip team.
 
 ## 5. Open questions
 

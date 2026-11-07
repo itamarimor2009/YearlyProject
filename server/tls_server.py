@@ -27,8 +27,15 @@ from server.policy import PolicyEngine
 
 logger = logging.getLogger("server")
 
-# Close a client connection after this many seconds without any message.
+# A new client must finish the TLS handshake and log in within this many seconds.
+# (Otherwise a slow or bad client could hold a thread for a long time.)
+LOGIN_TIMEOUT_SECONDS = 10
+
+# Close a logged-in client connection after this many seconds without any message.
 IDLE_TIMEOUT_SECONDS = 600
+
+# The most client connections the server handles at the same time.
+MAX_CLIENTS = 100
 
 
 def hash_token(token):
@@ -50,6 +57,9 @@ class FilterServer:
         self.policy = PolicyEngine(repository)
         self.access_logger = AccessLogger(repository)
         self.tls_context = self.create_tls_context(config["cert_file"], config["key_file"])
+        # A counter of free "places" for clients. Each connection takes one place
+        # and gives it back when it ends.
+        self.free_places = threading.BoundedSemaphore(MAX_CLIENTS)
 
     def create_tls_context(self, cert_file, key_file):
         """
@@ -75,6 +85,13 @@ class FilterServer:
         try:
             while True:
                 client_socket, address = server_socket.accept()
+
+                # Too many clients at once? Refuse this one instead of starting a thread.
+                if not self.free_places.acquire(blocking=False):
+                    logger.warning("Too many clients, refused connection from %s", address[0])
+                    client_socket.close()
+                    continue
+
                 # daemon=True: the thread stops when the main program stops.
                 thread = threading.Thread(target=self.handle_client,
                                           args=(client_socket, address), daemon=True)
@@ -83,9 +100,16 @@ class FilterServer:
             server_socket.close()
 
     def handle_client(self, client_socket, address):
+        """Runs in its own thread for each client. Gives back the client's place at the end."""
+        try:
+            self.talk_to_client(client_socket, address)
+        finally:
+            self.free_places.release()
+
+    def talk_to_client(self, client_socket, address):
         """Talk with one client app, from the TLS handshake until it disconnects."""
         client_ip = address[0]
-        client_socket.settimeout(IDLE_TIMEOUT_SECONDS)
+        client_socket.settimeout(LOGIN_TIMEOUT_SECONDS)
 
         # Step 1: TLS handshake. Here the two sides do the Diffie-Hellman key exchange.
         try:
@@ -104,6 +128,8 @@ class FilterServer:
             client_id = self.do_hello(tls_socket, reader, client_ip)
             if client_id is not None:
                 # Step 3: answer questions until the client leaves.
+                # A logged-in client may stay quiet for longer.
+                tls_socket.settimeout(IDLE_TIMEOUT_SECONDS)
                 self.serve_requests(tls_socket, reader, client_id, client_ip)
         except ProtocolError as error:
             # The client broke the protocol rules: tell it why and disconnect.
@@ -141,7 +167,9 @@ class FilterServer:
             return None
 
         if not self.is_valid_client(client_id, token):
-            self.refuse(tls_socket, client_ip, "wrong token or unknown client '" + client_id + "'")
+            # repr() shows the name in quotes and turns special characters (like a new line)
+            # into visible codes, so a client can't write fake lines into our log.
+            self.refuse(tls_socket, client_ip, "wrong token or unknown client " + repr(client_id[:50]))
             return None
 
         protocol.send_message(tls_socket, {"type": protocol.HELLO_OK})

@@ -351,6 +351,8 @@ example-games.com
 | The client is used as an open proxy by others | The client listens on `127.0.0.1` only. |
 | The client is used to reach non-web services | Connection C allows only ports 80 and 443. |
 | Bad or huge input | Max line length, JSON validation, host name validation, socket timeouts. |
+| Slow or too many connections (tying up the server) | A new client must finish TLS + login within **10 seconds**; at most **100** clients at the same time. |
+| Fake lines in the server log | Text from the client (like a wrong `client_id`) is logged with `repr()`, so new-line characters can't create fake log lines. |
 | SQL injection | `?` placeholders only. |
 | Private key leaks | `server.key` stays on the server machine, is never committed to git, and has file permissions 600. |
 
@@ -359,7 +361,8 @@ versions pick a *hybrid* method (X25519 mixed with the post-quantum ML-KEM), whi
 
 How to show the Diffie-Hellman key exchange in the project presentation:
 * the client and server print it when connecting, e.g. `TLSv1.3, key exchange x25519, cipher TLS_AES_256_GCM_SHA384`;
-* capture connection B in **Wireshark** and point to the `key_share` field in ClientHello/ServerHello.
+* capture connection B in **Wireshark** and point to the `key_share` field in ClientHello/ServerHello
+  (step-by-step guide, and a capture tool that needs no admin rights: [TESTING.md](TESTING.md), section 4).
 
 ---
 
@@ -437,6 +440,8 @@ YearlyProject/
 ├── certs/                   # generated; keys are git-ignored
 ├── scripts/
 │   └── make_cert.sh
+├── tools/
+│   └── capture_tap.py       # demo: record connection B into a Wireshark file
 └── tests/
 ```
 
@@ -481,4 +486,5 @@ flowchart TB
 * A user who changes the browser's proxy setting can skip the filter. (True for any proxy-based filter without system-level control.)
 * For blocked **HTTPS** sites the browser shows its own error, not our block page, because we do not decrypt HTTPS.
 * Filtering is by **site name only**, not by page or content.
+* A site opened by its **IP address** (e.g. `https://157.240.1.35`) is only blocked if that IP is in the list.
 * Same rules for everyone (by decision).
