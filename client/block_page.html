@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- block_page.html - Shown to the user when a plain http:// site is blocked.
+     {{HOST}} and {{MESSAGE}} are replaced by the client app before sending. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Site blocked</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; color: #333; text-align: center; padding-top: 80px; }
+    .box { display: inline-block; background: white; padding: 30px 50px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    h1 { color: #c0392b; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>&#128683; {{TITLE}}</h1>
+    <p><b>{{HOST}}</b></p>
+    <p>{{MESSAGE}}</p>
+  </div>
+</body>
+</html>

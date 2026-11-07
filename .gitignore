@@ -1,0 +1,19 @@
+# PDFs made from the docs (made again whenever needed)
+docs/pdf/
+
+# Real settings contain secrets (tokens). Only the *.example.json files are in git.
+config/server.json
+config/client.json
+
+# Certificates and private keys are created on each machine with scripts/make_cert.sh
+certs/
+
+# Database and log files
+data/*.db
+data/*.db-*
+data/*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/

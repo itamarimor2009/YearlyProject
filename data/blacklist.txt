@@ -1,0 +1,19 @@
+# blacklist.txt - The sites that are blocked for everyone.
+#
+# One domain per line. "#" starts a comment. Empty lines are ignored.
+# Blocking a domain also blocks all its subdomains:
+#   "facebook.com" blocks www.facebook.com, m.facebook.com, ...
+#
+# After changing this file run:   python run_server.py import
+# (or restart the server).
+
+# Social networks
+facebook.com
+instagram.com
+tiktok.com
+
+# Games
+roblox.com
+
+# For testing (a plain http:// site, so you can see the block page)
+neverssl.com

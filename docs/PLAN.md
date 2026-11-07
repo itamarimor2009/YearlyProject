@@ -98,6 +98,21 @@ Working rules for the tickets:
 * Standard library only. Small, readable functions with comments — the code must be explainable in a presentation.
 * Each ticket ends with a commit that describes what was done.
 
+### Phase 1 status (2026-11-07)
+
+Phase 1 code was written directly (not through Paperclip tickets). Tested on one computer
+(server and client both on 127.0.0.1):
+
+| "Done when" item | Status |
+|---|---|
+| 1. Allowed `http://` and `https://` sites open | ✅ tested (example.com, ynet.co.il) |
+| 2. Blocked site and subdomains blocked, block page for `http://` | ✅ tested (facebook.com, neverssl.com) |
+| 3. Every check in `access_log` | ✅ tested (`python run_server.py logs`) |
+| 4. Server down → block all, recovers without restarting client | ✅ tested |
+| 5. Wrong token refused and logged | ✅ tested |
+| 6. Wireshark shows TLS 1.3 with Diffie-Hellman `key_share` | ⏳ to do — logs already show `TLSv1.3, key exchange x25519` |
+| Two different computers on the same network | ⏳ to do |
+
 ## 5. Open questions
 
 _None right now._ New questions are added here and decided before the related ticket starts.

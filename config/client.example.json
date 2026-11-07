@@ -1,0 +1,10 @@
+{
+  "local_port": 8080,
+  "server_host": "192.168.1.50",
+  "server_port": 9443,
+  "server_cert": "certs/server.crt",
+  "client_id": "pc-12",
+  "token": "PUT-THE-TOKEN-FROM-add-client-HERE",
+  "check_timeout_seconds": 3,
+  "allowed_ports": [80, 443]
+}

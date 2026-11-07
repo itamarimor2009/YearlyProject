@@ -1,0 +1,9 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 9443,
+  "cert_file": "certs/server.crt",
+  "key_file": "certs/server.key",
+  "db_file": "data/filter.db",
+  "blacklist_file": "data/blacklist.txt",
+  "log_file": "data/server.log"
+}

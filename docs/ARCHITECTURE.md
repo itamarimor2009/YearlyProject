@@ -79,7 +79,7 @@ flowchart TB
     end
 
     subgraph SERVER["Filter server"]
-        TS["TLSServer<br/>listens on 0.0.0.0:9443<br/>one thread per client"]
+        TS["FilterServer<br/>listens on 0.0.0.0:9443<br/>one thread per client"]
         PR["Protocol<br/>hello / check / ping"]
         AU["Auth<br/>checks client token"]
         PE["PolicyEngine<br/>check(host) → Decision"]
@@ -109,7 +109,7 @@ flowchart TB
 
 | Part | Job |
 |---|---|
-| **TLSServer** | Accepts TLS connections from clients on port `9443`. One thread per client. |
+| **FilterServer** | Accepts TLS connections from clients on port `9443`. One thread per client. (`server/tls_server.py`) |
 | **Protocol** | Reads and writes the JSON-line messages (see section 6). |
 | **Auth** | The first message must be `hello` with a valid client token, otherwise the connection is closed. |
 | **PolicyEngine** | Decides allow/block for a host (see section 7). Does **not** know about sockets or SQL. |
@@ -189,7 +189,7 @@ sequenceDiagram
     B->>C: CONNECT www.ynet.com:443
     C-xS: check www.ynet.com (no answer within 3 seconds)
     Note over C: Fail closed: when in doubt, block
-    C-->>B: 403 "Filter server unavailable"
+    C-->>B: 503 "Filter server unavailable"
     Note over C: Tries to reconnect in the background
 ```
 
@@ -236,7 +236,7 @@ flowchart LR
 | C → S | `check` | `{"type":"check","id":7,"host":"www.ynet.com"}` |
 | S → C | `result` | `{"type":"result","id":7,"decision":"allow","rule":null}` |
 | S → C | `result` | `{"type":"result","id":8,"decision":"block","rule":"facebook.com"}` |
-| C → S | `ping` | `{"type":"ping","id":9}` — keeps an idle connection alive |
+| C → S | `ping` | `{"type":"ping","id":9}` — "are you there?" (the server supports it; in Phase 1 the client doesn't need it, because it reconnects automatically) |
 | S → C | `pong` | `{"type":"pong","id":9}` |
 | S → C | `error` | `{"type":"error","id":7,"code":"bad_request","message":"…"}` |
 
@@ -277,7 +277,6 @@ flowchart TB
 erDiagram
     sources ||--o{ blocked_sites : "provides"
     clients ||--o{ access_log : "makes"
-    blocked_sites ||--o{ access_log : "matched by"
 
     sources {
         int id PK
@@ -307,12 +306,14 @@ erDiagram
         text client_ip
         text host
         text decision "allow or block"
-        int rule_id FK "null when allowed"
+        text rule "matched blocked domain, null when allowed"
     }
 ```
 
 * `blocked_sites` has a unique key on `(domain, source_id)` and an index on `domain`.
 * `access_log` has indexes on `ts` and `host` (the future dashboard will search by these).
+* `access_log.rule` stores the matched domain as **text** (not a link to `blocked_sites`), so old log rows
+  stay correct even after the blocklist is imported again.
 * The schema version is stored with `PRAGMA user_version`, so later phases can upgrade the database safely.
 * Every thread opens its **own** SQLite connection. All SQL uses `?` placeholders (no SQL injection).
 
@@ -335,7 +336,7 @@ example-games.com
 * One domain per line. `#` starts a comment. Empty lines are ignored.
 * Lines that are not valid domain names are skipped and reported.
 * Importing **replaces** everything that came from this file (it is the source of truth for the `file:blacklist.txt` source).
-* Import runs at server start-up and with the command `python -m server import data/blacklist.txt`.
+* Import runs at server start-up and with the command `python run_server.py import`.
   The server reads the database on each check, so changes take effect immediately.
 
 ---
@@ -353,8 +354,11 @@ example-games.com
 | SQL injection | `?` placeholders only. |
 | Private key leaks | `server.key` stays on the server machine, is never committed to git, and has file permissions 600. |
 
+Both sides ask for the **X25519** group explicitly (`common/tls_settings.py`). Without this, new OpenSSL
+versions pick a *hybrid* method (X25519 mixed with the post-quantum ML-KEM), which is harder to explain.
+
 How to show the Diffie-Hellman key exchange in the project presentation:
-* print `ssl_socket.version()` and `ssl_socket.cipher()` after connecting;
+* the client and server print it when connecting, e.g. `TLSv1.3, key exchange x25519, cipher TLS_AES_256_GCM_SHA384`;
 * capture connection B in **Wireshark** and point to the `key_share` field in ClientHello/ServerHello.
 
 ---
@@ -369,7 +373,8 @@ How to show the Diffie-Hellman key exchange in the project presentation:
   "cert_file": "certs/server.crt",
   "key_file": "certs/server.key",
   "db_file": "data/filter.db",
-  "blacklist_file": "data/blacklist.txt"
+  "blacklist_file": "data/blacklist.txt",
+  "log_file": "data/server.log"
 }
 ```
 
@@ -400,20 +405,23 @@ YearlyProject/
 ├── docs/
 │   ├── ARCHITECTURE.md      ← this file
 │   └── PLAN.md
+├── run_server.py            # python run_server.py run | import | add-client | logs
+├── run_client.py            # python run_client.py
 ├── common/                  # shared by client and server
+│   ├── config.py            # read a JSON settings file
 │   ├── protocol.py          # encode/decode messages, limits, error codes
-│   └── domains.py           # normalize host, build candidate domains
+│   ├── domains.py           # normalize host, build candidate domains
+│   └── tls_settings.py      # TLS 1.3 + X25519 Diffie-Hellman settings
 ├── client/
-│   ├── main.py              # python -m client
-│   ├── local_proxy.py       # LocalProxy + RequestParser
+│   ├── local_proxy.py       # LocalProxy + request parsing
 │   ├── filter_client.py     # FilterClient (TLS, lock, reconnect)
 │   ├── relay.py             # copy bytes both ways with select()
 │   └── block_page.html
 ├── server/
-│   ├── main.py              # python -m server run | import | add-client | logs
-│   ├── tls_server.py        # TLSServer + Protocol + Auth
+│   ├── tls_server.py        # FilterServer: TLS + protocol + login
 │   ├── policy.py            # PolicyEngine
 │   ├── access_logger.py
+│   ├── importer.py          # source → database
 │   ├── storage/
 │   │   ├── base.py          # Repository interface
 │   │   ├── sqlite_repo.py
@@ -432,7 +440,8 @@ YearlyProject/
 └── tests/
 ```
 
-Only the Python standard library is used: `socket`, `ssl`, `threading`, `select`, `sqlite3`, `json`, `hashlib`, `hmac`, `logging`.
+Only the Python standard library is used: `socket`, `ssl`, `threading`, `select`, `sqlite3`, `json`, `hashlib`, `hmac`, `secrets`, `logging`.
+Run everything from the project folder (no `pip install` needed).
 
 ---
 
