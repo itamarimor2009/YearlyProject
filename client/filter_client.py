@@ -53,6 +53,9 @@ class FilterClient:
         # Cache settings. cache_seconds = 0 turns the cache (and the offline fallback) off.
         self.cache_seconds = config.get("cache_seconds", DEFAULT_CACHE_SECONDS)
         self.offline_grace_seconds = config.get("offline_grace_seconds", DEFAULT_OFFLINE_GRACE_SECONDS)
+        # A grace time smaller than cache_seconds would make a fresh answer "too old" offline.
+        if self.offline_grace_seconds < self.cache_seconds:
+            self.offline_grace_seconds = self.cache_seconds
         self.cache = DecisionCache(config.get("cache_max_entries", DEFAULT_CACHE_MAX_ENTRIES),
                                    self.offline_grace_seconds)
 

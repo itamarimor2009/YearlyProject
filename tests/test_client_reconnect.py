@@ -17,6 +17,7 @@ CONFIG = {
     "token": "x",
     "check_timeout_seconds": 1,
     "server_cert": None,
+    "cache_seconds": 0,  # These tests are about reconnecting, so the cache is off.
 }
 
 
