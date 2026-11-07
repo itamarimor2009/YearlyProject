@@ -27,9 +27,13 @@ with an admin dashboard and external blocklist sources.
 | 10 | Allowed ports | Client opens websites only on **80 and 443**. |
 | 11 | Blocklist source (Phase 1) | `blacklist.txt` file **on the server machine**, imported into SQLite. Not sent over the network. |
 | 12 | Logging | **Required.** Every check (allow and block) is written to the database. Basis for the future dashboard. |
-| 13 | Server unreachable | Phase 1: **block** (fail closed). Phase 2: use the client cache, block if never asked before. |
-| 14 | Client cache | **Phase 2**, not Phase 1. |
+| 13 | Server unreachable | Phase 1: **block** (fail closed). Phase 2: use a cached answer saved in the last `offline_grace_seconds` (default 1 hour), even if expired; otherwise block. |
+| 14 | Client cache | **Phase 2**, not Phase 1. A `DecisionCache` class inside the client, in front of the server call. The server does not change. |
 | 15 | Code & tools | Private GitHub repo `shali-mor/YearlyProject`. Work is split into tickets in **Paperclip**. |
+| 16 | When the server is asked (Phase 2) | Only when the cache has no fresh answer (saved less than `cache_seconds` ago) for the cleaned host name. |
+| 17 | Cache key and size (Phase 2) | Key = host cleaned with `common.domains.normalize_host`. Expiry `cache_seconds` = **300**. At most `cache_max_entries` = **1000** hosts; the one saved longest ago is removed first. Only real `result` answers are saved. Memory only. |
+| 18 | Logging vs. cache (Phase 2) | Accepted trade-off: answers from the cache are **not** in the server's `access_log`. Written in ARCHITECTURE.md, *Known limitations*. `cache_seconds: 0` turns the cache off. |
+| 19 | Reconnect (Phase 2) | Waits of 1, 2, 4, 8, 16, 30, 30 … seconds after failed attempts in a row; back to 1 after a successful connection. No background thread. |
 
 ## 3. Phases
 
@@ -61,10 +65,29 @@ What gets built:
 6. Wireshark on connection B shows only TLS 1.3 traffic with a Diffie-Hellman `key_share`.
 
 ### Phase 2 — Client cache and offline fallback
-* Small cache in the client (site → decision, with an expiry time, e.g. 5 minutes).
-* Ask the server only when the site is not in the cache.
-* Server unreachable → use the cached answer; never-asked site → block.
-* Reconnect with increasing wait times.
+
+The design is in ARCHITECTURE.md, sections 5.4 (offline), 5.6 (cache hit), 11 (settings) and 14 (limitations).
+
+What gets built (client only — server, protocol and database do not change):
+* `client/decision_cache.py`: class `DecisionCache` — cleaned host → decision + time saved, own lock,
+  fresh lookup, offline lookup, size limit (oldest removed first).
+* `FilterClient` uses the cache before asking the server, saves real answers, and uses the offline rule
+  when the server can't be reached.
+* `FilterClient` reconnects with increasing waits (1 → 30 seconds) instead of a fixed 5 seconds.
+* New optional settings in `config/client.json`: `cache_seconds`, `offline_grace_seconds`, `cache_max_entries`
+  (and in `config/client.example.json`).
+* Unit tests for the cache and the waits (using a fake clock, so tests don't sleep), and an updated test guide.
+
+**Done when:**
+1. Opening the same site twice within 5 minutes sends **one** `check` to the server (one `access_log` row).
+2. After 5 minutes the server is asked again.
+3. Server stopped: a site checked in the last hour still opens (or stays blocked if it was blocked);
+   a site never checked is blocked with "filter server unavailable".
+4. Server stopped: the client's connection attempts are spaced 1, 2, 4 … up to 30 seconds apart; after the
+   server is started again, the client recovers without a restart and the wait is back to 1 second.
+5. `cache_seconds: 0` gives exactly the Phase 1 behavior.
+6. All Phase 1 "Done when" items still pass; `python -m unittest discover tests` is green.
+7. Security review of Phase 2 has no critical or high findings.
 
 ### Phase 3 — Admin dashboard
 * Runs on the server machine, uses the same Repository.
@@ -117,6 +140,19 @@ Phase 1 code was written directly (not through Paperclip tickets). Tested on one
 | Presentation | ✅ slide deck (see the project's chat / artifacts) |
 
 **Phase 1 is complete.** Phase 2 continues on the `phase-2` branch, run by the Paperclip team.
+
+## 4b. Phase 2 tickets (Paperclip)
+
+| Ticket | What | Agent | Depends on |
+|---|---|---|---|
+| SHA-95 | Phase 2 design in ARCHITECTURE.md and PLAN.md (this change) | CTO | — |
+| SHA-96 | Client: `DecisionCache` + offline fallback in `FilterClient`, new settings, tests | Backend | SHA-95 |
+| SHA-97 | Client: reconnect with increasing waits, tests | Backend | SHA-95 |
+| SHA-98 | QA: test Phase 2 end to end, update TESTING.md, check the "Done when" items | QA | SHA-96, SHA-97 |
+| SHA-99 | Security review of Phase 2 | Security | SHA-96, SHA-97 |
+
+SHA-96 and SHA-97 both change `client/filter_client.py`: keep each change small and merge one before
+starting the other's final merge, to avoid conflicts.
 
 ## 5. Open questions
 

@@ -71,9 +71,11 @@ flowchart TB
         LP["LocalProxy<br/>listens on 127.0.0.1:8080<br/>one thread per browser connection"]
         RQ["RequestParser<br/>reads CONNECT / GET line<br/>→ host + port"]
         FC["FilterClient<br/>one TLS connection to server<br/>check(host) → allow/block"]
+        DC["DecisionCache (Phase 2)<br/>cleaned host → decision + time"]
         RL["Relay<br/>copies bytes browser ⇄ website"]
         BP["Block page"]
         LP --> RQ --> FC
+        FC <--> DC
         FC -- allow --> RL
         FC -- block --> BP
     end
@@ -101,7 +103,8 @@ flowchart TB
 |---|---|
 | **LocalProxy** | Accepts connections from the browser on `127.0.0.1:8080`. Starts a thread for each one. |
 | **RequestParser** | Reads the first line the browser sends and gets the `host` and `port`. |
-| **FilterClient** | Keeps **one TLS connection** to the server. `check(host)` sends a question and **waits on the socket** for the answer. A lock makes sure only one question at a time travels on the socket. If the connection drops, it reconnects. |
+| **FilterClient** | Keeps **one TLS connection** to the server. `check(host)` sends a question and **waits on the socket** for the answer. A lock makes sure only one question at a time travels on the socket. If the connection drops, it reconnects, waiting longer after each failure (see section 5.4). |
+| **DecisionCache** (Phase 2) | Remembers the server's last answer for each cleaned host name, with the time it was saved. `FilterClient` looks here **before** asking the server. (`client/decision_cache.py`, rules in section 5.6) |
 | **Relay** | When the site is allowed, opens connection C to the website and copies bytes in both directions until one side closes. |
 | **Block page** | When the site is blocked, sends the browser `403 Forbidden` (and an HTML page for `http://` sites). |
 
@@ -179,22 +182,49 @@ sequenceDiagram
     Note over C: No connection to facebook.com is ever opened
 ```
 
-### 5.4 Server not reachable (Phase 1)
+### 5.4 Server not reachable (Phase 2: offline fallback)
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
     participant C as Client app
+    participant DC as DecisionCache
     participant S as Filter server
     B->>C: CONNECT www.ynet.com:443
+    C->>DC: fresh answer for www.ynet.com?
+    DC-->>C: no (never asked, or older than 5 minutes)
     C-xS: check www.ynet.com (no answer within 3 seconds)
-    Note over C: Fail closed: when in doubt, block
-    C-->>B: 503 "Filter server unavailable"
-    Note over C: Tries to reconnect in the background
+    C->>DC: any answer saved in the last hour?
+    alt yes, saved answer is allow
+        DC-->>C: allow
+        C-->>B: HTTP/1.1 200 Connection Established
+    else yes, saved answer is block
+        DC-->>C: block
+        C-->>B: HTTP/1.1 403 Forbidden
+    else no usable answer
+        DC-->>C: nothing
+        Note over C: Fail closed: when in doubt, block
+        C-->>B: 503 "Filter server unavailable"
+    end
+    Note over C: Next connection attempt only after the waiting time (1, 2, 4 ... 30 seconds)
 ```
 
-In **Phase 2** the client gets a small cache. When the server is unreachable, the client uses a cached answer
-if it has one, and blocks only sites it has never asked about.
+**Offline rule:** when the server can't be reached, the client may use a cached answer **even if it is
+expired**, as long as it was saved at most `offline_grace_seconds` ago (default **3600** = 1 hour).
+If there is no such answer, the site is **blocked** with `503`, exactly like in Phase 1.
+
+**Reconnect with increasing waits.** Phase 1 waited a fixed 5 seconds after a failed connection.
+Phase 2 waits longer after each failure in a row: **1, 2, 4, 8, 16, 30, 30, …** seconds (doubled each time,
+never more than 30). After a **successful** connection the wait goes back to 1 second.
+
+* There is no background thread: the client tries to connect when a browser request needs the server
+  and the waiting time is over.
+* While the client is waiting, a request does not touch the network at all. It goes straight to the offline
+  rule above, so the browser gets an answer immediately instead of after a 3-second timeout.
+* If an *open* connection breaks in the middle of a check, the client reconnects once right away
+  (the server may simply have closed an idle connection). Only a *failed connection attempt* starts the waits.
+* Why increasing waits: a server that is down for a long time is not hammered with connection attempts,
+  but a short break (for example a server restart) is still noticed within a second or two.
 
 ### 5.5 One page, many sites
 
@@ -219,6 +249,43 @@ flowchart LR
   when it is embedded inside another site.
 * For plain `http://` the client forces one request per connection (`Connection: close`), so every request
   is checked against the right host.
+* From Phase 2, "one check" first looks in the client's cache (section 5.6). So the server is asked about
+  `images.ynet.com` only the first time in 5 minutes, not for every new connection.
+
+### 5.6 Answer from the cache (Phase 2)
+
+**The rule in one sentence:** the client asks the server only when its cache has no *fresh* answer
+(saved less than `cache_seconds` ago) for the cleaned host name.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant C as Client app
+    participant DC as DecisionCache
+    participant S as Filter server
+    B->>C: CONNECT www.ynet.com:443
+    C->>DC: fresh answer for www.ynet.com?
+    DC-->>C: yes, allow (saved 40 seconds ago)
+    Note over C,S: The server is not asked, so no access_log row is written
+    C-->>B: HTTP/1.1 200 Connection Established
+```
+
+How the cache works (`client/decision_cache.py`, class `DecisionCache`, used only by `FilterClient`):
+
+| Question | Answer |
+|---|---|
+| What is the key? | The **cleaned host name** from `common.domains.normalize_host` (lowercase, no trailing dot, IDNA). So `WWW.Ynet.com.` and `www.ynet.com` share one entry. A host that `normalize_host` rejects is never cached; it is sent to the server as in Phase 1 (which answers `error` → block). |
+| What is stored? | The decision (`allow` or `block`) and the time it was saved. |
+| Which answers are saved? | Only real `result` answers from the server. An `error` reply or "server unavailable" is **never** saved. |
+| When is an answer fresh? | When it was saved less than `cache_seconds` ago (default **300** = 5 minutes). A fresh answer is used without asking the server. |
+| When can an old answer still be used? | Only when the server is unreachable, and only if it was saved less than `offline_grace_seconds` ago (default **3600**), see section 5.4. |
+| How big can it get? | At most `cache_max_entries` hosts (default **1000**). When it is full, the entry that was **saved longest ago is removed first**. Saving a host again counts as new. |
+| When are entries deleted? | When they are too old even for offline use (older than `offline_grace_seconds`), or pushed out because the cache is full. |
+| Threads? | Many browser connections run at the same time, so the cache has its **own lock**. A cache hit does not need the socket lock, so it never waits behind a slow server question. |
+| Turning it off | `cache_seconds: 0` means nothing is saved: every check asks the server and the offline fallback is off (Phase 1 behavior). Useful for tests and the demo. |
+
+The client writes a short line to its own log for each cache answer (e.g. `www.ynet.com allow (cache)`),
+so a cache answer can still be seen while testing.
 
 ---
 
@@ -236,7 +303,7 @@ flowchart LR
 | C → S | `check` | `{"type":"check","id":7,"host":"www.ynet.com"}` |
 | S → C | `result` | `{"type":"result","id":7,"decision":"allow","rule":null}` |
 | S → C | `result` | `{"type":"result","id":8,"decision":"block","rule":"facebook.com"}` |
-| C → S | `ping` | `{"type":"ping","id":9}` — "are you there?" (the server supports it; in Phase 1 the client doesn't need it, because it reconnects automatically) |
+| C → S | `ping` | `{"type":"ping","id":9}` — "are you there?" (the server supports it; the client doesn't need it, because it reconnects automatically) |
 | S → C | `pong` | `{"type":"pong","id":9}` |
 | S → C | `error` | `{"type":"error","id":7,"code":"bad_request","message":"…"}` |
 
@@ -337,7 +404,8 @@ example-games.com
 * Lines that are not valid domain names are skipped and reported.
 * Importing **replaces** everything that came from this file (it is the source of truth for the `file:blacklist.txt` source).
 * Import runs at server start-up and with the command `python run_server.py import`.
-  The server reads the database on each check, so changes take effect immediately.
+  The server reads the database on each check, so changes take effect immediately on the server.
+  Clients may still use a cached answer for up to `cache_seconds` (5 minutes) — see section 14.
 
 ---
 
@@ -391,9 +459,16 @@ How to show the Diffie-Hellman key exchange in the project presentation:
   "client_id": "pc-12",
   "token": "…",
   "check_timeout_seconds": 3,
-  "allowed_ports": [80, 443]
+  "allowed_ports": [80, 443],
+  "cache_seconds": 300,
+  "offline_grace_seconds": 3600,
+  "cache_max_entries": 1000
 }
 ```
+
+The last three settings are new in Phase 2 and **optional**: if one is missing, the client uses the
+default shown above. `offline_grace_seconds` should be at least `cache_seconds`; a smaller value is
+raised to `cache_seconds` (otherwise a fresh answer could be "too old" for offline use).
 
 The server certificate is created once with a script (`scripts/make_cert.sh`). Its *Subject Alternative Name*
 must contain the server's IP address or host name, otherwise the client will reject it.
@@ -417,7 +492,8 @@ YearlyProject/
 │   └── tls_settings.py      # TLS 1.3 + X25519 Diffie-Hellman settings
 ├── client/
 │   ├── local_proxy.py       # LocalProxy + request parsing
-│   ├── filter_client.py     # FilterClient (TLS, lock, reconnect)
+│   ├── filter_client.py     # FilterClient (TLS, lock, reconnect with increasing waits)
+│   ├── decision_cache.py    # DecisionCache: host → decision, expiry, offline grace (Phase 2)
 │   ├── relay.py             # copy bytes both ways with select()
 │   └── block_page.html
 ├── server/
@@ -461,20 +537,25 @@ flowchart TB
         REPO --> DB[("SQLite")]
     end
 
+    subgraph P2["Phase 2 (client only)"]
+        FC["FilterClient"] --> CACHE["DecisionCache<br/>expiry + offline grace"]
+        FC --> BACK["Reconnect with<br/>increasing waits"]
+    end
+
     subgraph LATER["Later phases (new code only, nothing above changes)"]
-        CACHE["Client cache<br/>(Phase 2)"]
         DASH["Admin dashboard<br/>logs, charts, edit blocklist<br/>(Phase 3)"]
         EXT["External sources<br/>public category lists<br/>(Phase 4)"]
     end
 
+    FC == "check over TLS<br/>(only on a cache miss)" ==> PE
     DASH --> REPO
     EXT --> IMP
-    CACHE -.-> PE
 ```
 
 | Future feature | Where it plugs in |
 |---|---|
-| Client cache | New class inside the client in front of `FilterClient`. The server does not change. |
+| Client cache (Phase 2) | New class `DecisionCache` (`client/decision_cache.py`), used by `FilterClient` in front of the server call. The server, the protocol and the database **do not change**. |
+| Reconnect with increasing waits (Phase 2) | Inside `FilterClient` only: the fixed 5-second wait becomes 1, 2, 4 … 30 seconds. |
 | Admin dashboard | A new program on the server machine that uses the same `Repository` to read `access_log` and edit `blocked_sites`. |
 | External blocklist sources | A new `RuleSource` subclass (e.g. download a public list). Each source gets its own row in `sources`, so it can be refreshed or removed as a group. |
 | Different database | A new `Repository` implementation. |
@@ -488,3 +569,11 @@ flowchart TB
 * Filtering is by **site name only**, not by page or content.
 * A site opened by its **IP address** (e.g. `https://157.240.1.35`) is only blocked if that IP is in the list.
 * Same rules for everyone (by decision).
+* **Cached answers are not logged on the server** (Phase 2). When the client answers from its cache, the server
+  is not asked, so there is no `access_log` row. The log (and the future dashboard) shows **at most about one
+  check per host per client every `cache_seconds`**, not every visit. This is the price for fewer messages and
+  for working while the server is down. Setting `cache_seconds: 0` brings back "every check is logged".
+* **Blocklist changes reach clients with a delay** (Phase 2). A site that is newly added to the blocklist can
+  stay allowed on a client for up to `cache_seconds` (5 minutes), and up to `offline_grace_seconds` (1 hour)
+  while the server is unreachable. Removing a site from the list has the same delay.
+* The cache lives only in memory: restarting the client app empties it.
