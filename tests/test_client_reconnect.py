@@ -46,7 +46,7 @@ class ReconnectTests(unittest.TestCase):
         self.server_up = False
         self.connect_calls = 0
         self.client.connect = self.fake_connect
-        self.client.ask = lambda host: "allow"
+        self.client.ask = lambda host: ("allow", True)
 
     def fake_connect(self):
         """Pretend to connect: fails while server_up is False."""

@@ -15,7 +15,9 @@ import ssl
 import threading
 import time
 
+from client.decision_cache import DecisionCache
 from common import protocol
+from common.domains import normalize_host
 from common.protocol import ProtocolError
 from common.tls_settings import describe_connection, use_diffie_hellman
 
@@ -30,6 +32,11 @@ UNAVAILABLE = "unavailable"
 FIRST_RETRY_WAIT_SECONDS = 1
 MAX_RETRY_WAIT_SECONDS = 30
 
+# Defaults for the optional cache settings (old config files without them still work).
+DEFAULT_CACHE_SECONDS = 300           # an answer this young is used without asking the server
+DEFAULT_OFFLINE_GRACE_SECONDS = 3600  # when the server is down, answers up to this old are used
+DEFAULT_CACHE_MAX_ENTRIES = 1000
+
 
 class FilterClient:
     """Asks the filter server whether sites are allowed."""
@@ -42,6 +49,12 @@ class FilterClient:
         self.token = config["token"]
         self.timeout = config["check_timeout_seconds"]
         self.tls_context = self.create_tls_context(config["server_cert"], config.get("tls_keylog_file"))
+
+        # Cache settings. cache_seconds = 0 turns the cache (and the offline fallback) off.
+        self.cache_seconds = config.get("cache_seconds", DEFAULT_CACHE_SECONDS)
+        self.offline_grace_seconds = config.get("offline_grace_seconds", DEFAULT_OFFLINE_GRACE_SECONDS)
+        self.cache = DecisionCache(config.get("cache_max_entries", DEFAULT_CACHE_MAX_ENTRIES),
+                                   self.offline_grace_seconds)
 
         self.lock = threading.Lock()  # Only one question at a time on the socket.
         self.tls_socket = None        # None means "not connected".
@@ -144,8 +157,42 @@ class FilterClient:
 
     def check(self, host):
         """
-        Ask the server about one site.
-        Returns protocol.ALLOW, protocol.BLOCK, or UNAVAILABLE (server can't be reached).
+        Decide about one site. Returns protocol.ALLOW, protocol.BLOCK, or UNAVAILABLE.
+        Order: 1) fresh cached answer  2) ask the server  3) offline: older cached answer
+        4) UNAVAILABLE (the proxy then blocks: "fail closed").
+        """
+        # The cache is keyed by the cleaned host name. A bad name is never cached:
+        # it goes to the server like in Phase 1 (the server answers "error" -> block).
+        clean_host = normalize_host(host)
+        use_cache = clean_host is not None and self.cache_seconds > 0
+
+        if use_cache:
+            cached = self.cache.get(clean_host, self.cache_seconds)
+            if cached is not None:
+                logger.info("%s %s (cache hit)", clean_host, cached)
+                return cached
+
+        decision, from_server = self.ask_server(host)
+
+        if from_server:
+            # Only real answers from the server are saved (never errors or "unavailable").
+            if use_cache:
+                self.cache.put(clean_host, decision)
+            return decision
+
+        if decision == UNAVAILABLE and use_cache:
+            old = self.cache.get(clean_host, self.offline_grace_seconds)
+            if old is not None:
+                logger.warning("%s %s (offline: using cached answer)", clean_host, old)
+                return old
+            logger.warning("%s unavailable (offline: no cached answer, blocking)", clean_host)
+        return decision
+
+    def ask_server(self, host):
+        """
+        Ask the server about one site (holding the socket lock).
+        Returns (decision, from_server). from_server is True only for a real "result"
+        answer, so check() knows what may be saved in the cache.
         """
         with self.lock:
             # Two tries: if the old connection was closed by the server (for example after
@@ -154,7 +201,7 @@ class FilterClient:
                 if self.tls_socket is None:
                     # Don't keep trying while the server is down.
                     if self.must_wait():
-                        return UNAVAILABLE
+                        return UNAVAILABLE, False
                     try:
                         self.connect()
                         self.connection_succeeded()
@@ -162,7 +209,7 @@ class FilterClient:
                         logger.warning("Could not connect to the filter server: %s", error)
                         self.disconnect()
                         self.connection_failed()
-                        return UNAVAILABLE
+                        return UNAVAILABLE, False
 
                 try:
                     return self.ask(host)
@@ -170,10 +217,13 @@ class FilterClient:
                     logger.warning("Lost connection to the filter server: %s", error)
                     self.disconnect()
 
-            return UNAVAILABLE
+            return UNAVAILABLE, False
 
     def ask(self, host):
-        """Send one "check" message and wait for the "result". (The lock is already held.)"""
+        """
+        Send one "check" message and wait for the "result". (The lock is already held.)
+        Returns (decision, from_server): from_server is False for error replies.
+        """
         request_id = self.next_request_id
         self.next_request_id = self.next_request_id + 1
 
@@ -185,9 +235,9 @@ class FilterClient:
 
         if reply["type"] == protocol.RESULT and reply.get("id") == request_id:
             if reply.get("decision") == protocol.ALLOW:
-                return protocol.ALLOW
-            return protocol.BLOCK
+                return protocol.ALLOW, True
+            return protocol.BLOCK, True
 
         # An error (for example "not a valid host name") or a strange reply: block, to be safe.
         logger.warning("Unexpected reply from the server for %s: %s", host, reply)
-        return protocol.BLOCK
+        return protocol.BLOCK, False

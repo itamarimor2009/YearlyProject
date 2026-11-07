@@ -6,5 +6,10 @@
   "client_id": "pc-12",
   "token": "PUT-THE-TOKEN-FROM-add-client-HERE",
   "check_timeout_seconds": 3,
-  "allowed_ports": [80, 443]
+  "allowed_ports": [
+    80,
+    443
+  ],
+  "cache_seconds": 300,
+  "offline_grace_seconds": 3600
 }
