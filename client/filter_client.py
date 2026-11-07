@@ -24,9 +24,11 @@ logger = logging.getLogger("filter")
 # The answer when the server can't be reached. The proxy then blocks the site ("fail closed").
 UNAVAILABLE = "unavailable"
 
-# After a failed connection, wait this many seconds before trying again.
-# Without this, every browser request would wait for its own timeout while the server is down.
-RETRY_WAIT_SECONDS = 5
+# After a failed connection we wait before trying again, and the wait grows with every
+# failure in a row: 1, 2, 4, 8, 16, 30, 30 ... seconds. It never gets longer than the maximum.
+# Without any wait, every browser request would wait for its own timeout while the server is down.
+FIRST_RETRY_WAIT_SECONDS = 1
+MAX_RETRY_WAIT_SECONDS = 30
 
 
 class FilterClient:
@@ -45,7 +47,9 @@ class FilterClient:
         self.tls_socket = None        # None means "not connected".
         self.reader = None
         self.next_request_id = 1
-        self.last_failure_time = 0    # When the last connection attempt failed.
+        self.clock = time.time        # The clock. Tests replace it with a fake one, so they never sleep.
+        self.retry_wait = FIRST_RETRY_WAIT_SECONDS  # How long we wait after the latest failure.
+        self.last_failure_time = None  # When the last connection attempt failed (None = no failure yet).
 
     def create_tls_context(self, server_cert_file, keylog_file):
         """
@@ -102,16 +106,40 @@ class FilterClient:
         self.reader = None
         self.tls_socket = None
 
+    def connection_failed(self):
+        """
+        Remember that a connection attempt failed. Call this with the lock held.
+        The waiting time is counted from now. The first failure waits 1 second; every further
+        failure in a row doubles the wait (up to the maximum).
+        """
+        if self.last_failure_time is not None:
+            self.retry_wait = self.retry_wait * 2
+            if self.retry_wait > MAX_RETRY_WAIT_SECONDS:
+                self.retry_wait = MAX_RETRY_WAIT_SECONDS
+        self.last_failure_time = self.clock()
+
+    def connection_succeeded(self):
+        """Forget all earlier failures, so the next failure starts again at the shortest wait."""
+        self.retry_wait = FIRST_RETRY_WAIT_SECONDS
+        self.last_failure_time = None
+
+    def must_wait(self):
+        """True while we are still inside the waiting time after the last failed connection."""
+        if self.last_failure_time is None:
+            return False
+        return self.clock() - self.last_failure_time < self.retry_wait
+
     def try_connect(self):
         """Connect now (used when the client app starts). Returns True if it worked."""
         with self.lock:
             try:
                 self.connect()
+                self.connection_succeeded()
                 return True
             except (OSError, ProtocolError) as error:
                 logger.warning("Could not connect to the filter server: %s", error)
                 self.disconnect()
-                self.last_failure_time = time.time()
+                self.connection_failed()
                 return False
 
     def check(self, host):
@@ -125,14 +153,15 @@ class FilterClient:
             for attempt in range(2):
                 if self.tls_socket is None:
                     # Don't keep trying while the server is down.
-                    if time.time() - self.last_failure_time < RETRY_WAIT_SECONDS:
+                    if self.must_wait():
                         return UNAVAILABLE
                     try:
                         self.connect()
+                        self.connection_succeeded()
                     except (OSError, ProtocolError) as error:
                         logger.warning("Could not connect to the filter server: %s", error)
                         self.disconnect()
-                        self.last_failure_time = time.time()
+                        self.connection_failed()
                         return UNAVAILABLE
 
                 try:
