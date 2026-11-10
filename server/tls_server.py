@@ -155,6 +155,7 @@ class FilterServer:
             self.refuse(tls_socket, client_ip, "first message must be hello")
             return None
 
+        # A client that speaks another version of the protocol can't be served.
         if message.get("version") != protocol.PROTOCOL_VERSION:
             protocol.send_message(tls_socket, protocol.make_error(
                 protocol.ERR_UNSUPPORTED_VERSION, "Server speaks protocol version 1"))

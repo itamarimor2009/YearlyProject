@@ -24,7 +24,8 @@ HELLO = "hello"          # client -> server: "this is me, here is my token"
 HELLO_OK = "hello_ok"    # server -> client: "login OK"
 CHECK = "check"          # client -> server: "may I open this site?"
 RESULT = "result"        # server -> client: "allow" or "block"
-PING = "ping"            # client -> server: "are you there?"
+PING = "ping"            # client -> server: "are you there?" (the server answers it; our client
+                         #   doesn't need it yet, because it reconnects by itself)
 PONG = "pong"            # server -> client: "yes"
 ERROR = "error"          # server -> client: something went wrong
 
@@ -33,11 +34,11 @@ ALLOW = "allow"
 BLOCK = "block"
 
 # --- Error codes ---
-ERR_UNAUTHORIZED = "unauthorized"
-ERR_BAD_REQUEST = "bad_request"
-ERR_TOO_LONG = "too_long"
-ERR_UNSUPPORTED_VERSION = "unsupported_version"
-ERR_INTERNAL = "internal"
+ERR_UNAUTHORIZED = "unauthorized"                # wrong first message, client_id or token
+ERR_BAD_REQUEST = "bad_request"                  # not JSON, unknown type, invalid host name
+ERR_TOO_LONG = "too_long"                        # a line longer than MAX_LINE_LENGTH
+ERR_UNSUPPORTED_VERSION = "unsupported_version"  # "hello" with another protocol version
+ERR_INTERNAL = "internal"                        # reserved for server failures (not used yet)
 
 
 class ProtocolError(Exception):

@@ -85,6 +85,8 @@ class LocalProxy:
         if head is None:
             return
 
+        # The first line looks like "CONNECT www.ynet.com:443 HTTP/1.1":
+        # method, target, and HTTP version, separated by spaces.
         first_line = head.split("\r\n")[0]
         parts = first_line.split(" ")
         if len(parts) != 3:
@@ -109,7 +111,7 @@ class LocalProxy:
                            "Only ports " + str(self.allowed_ports) + " are allowed.")
             return
 
-        # Step 2: ask the filter server.
+        # Step 2: ask the filter server. This WAITS for the answer (usually a few milliseconds).
         decision = self.filter_client.check(host)
 
         if decision == protocol.BLOCK:
@@ -138,6 +140,7 @@ class LocalProxy:
                 # HTTPS: tell the browser the tunnel is ready. From now on the browser
                 # and the website talk TLS to each other through us.
                 browser_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                # Bytes that arrived together with the CONNECT line belong to the website.
                 if extra_data != b"":
                     website_socket.sendall(extra_data)
             else:

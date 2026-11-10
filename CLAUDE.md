@@ -1,7 +1,7 @@
 # Working on this project
 
-This is a **high-school** yearly project (not university). The student must understand and
-present every line, so keep it simple.
+This project is by Itamar. Itamar must be able to understand and present every line,
+so keep it simple.
 
 ## Rules
 

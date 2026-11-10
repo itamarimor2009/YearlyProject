@@ -1,6 +1,6 @@
 # Site Filter Proxy — Project Plan
 
-> High-school yearly project. Python, sockets, secure connections, simple database.
+> By Itamar. Python, sockets, secure connections, simple database.
 > How the system works (diagrams, protocol, database) is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
@@ -112,9 +112,9 @@ Phase 1 code was written directly (not through Paperclip tickets). Tested on one
 | 5. Wrong token refused and logged | ✅ tested |
 | 6. Wireshark shows TLS 1.3 with Diffie-Hellman `key_share` | ✅ recorded with `tools/capture_tap.py` → `docs/wireshark/` (Client/Server Hello key_share = x25519, then only Application Data) |
 | Server reached over the network IP (10.0.0.24), certificate for that IP | ✅ tested (same Mac; the client used the network address, not 127.0.0.1) |
-| Two physically different computers | ⏳ for the student to do with the guide in [TESTING.md](TESTING.md), section 3 |
+| Two physically different computers | ⏳ still to do, with the guide in [TESTING.md](TESTING.md), section 3 |
 | Security review | ✅ done — added login timeout, max clients, safe logging of client text |
-| Presentation | ✅ slide deck (see the project's chat / artifacts) |
+| Presentation | ✅ slide deck and demo video |
 
 **Phase 1 is complete.** Phase 2 continues on the `phase-2` branch, run by the Paperclip team.
 

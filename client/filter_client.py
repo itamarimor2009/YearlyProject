@@ -45,7 +45,9 @@ class FilterClient:
         self.tls_socket = None        # None means "not connected".
         self.reader = None
         self.next_request_id = 1
-        self.last_failure_time = 0    # When the last connection attempt failed.
+        # When the last connection attempt failed (time.time() seconds).
+        # 0 means "long ago", so the very first attempt is never delayed.
+        self.last_failure_time = 0
 
     def create_tls_context(self, server_cert_file, keylog_file):
         """
@@ -118,6 +120,11 @@ class FilterClient:
         """
         Ask the server about one site.
         Returns protocol.ALLOW, protocol.BLOCK, or UNAVAILABLE (server can't be reached).
+
+        Many browser threads call this at the same time; the lock makes them take turns,
+        because they all share the one TLS connection.
+        If there is no connection, it connects first (but not more often than once every
+        RETRY_WAIT_SECONDS, so the browser isn't kept waiting while the server is down).
         """
         with self.lock:
             # Two tries: if the old connection was closed by the server (for example after
@@ -144,7 +151,11 @@ class FilterClient:
             return UNAVAILABLE
 
     def ask(self, host):
-        """Send one "check" message and wait for the "result". (The lock is already held.)"""
+        """
+        Send one "check" message and wait for the "result". (The lock is already held.)
+        Returns protocol.ALLOW or protocol.BLOCK. Network problems raise an exception,
+        which check() handles.
+        """
         request_id = self.next_request_id
         self.next_request_id = self.next_request_id + 1
 

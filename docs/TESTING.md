@@ -21,6 +21,9 @@ python -m unittest discover tests
 
 Result (2026-11-07): **31 tests, all passed.**
 
+Some tests send bad input on purpose (a wrong token, a bad line in a blocklist file), so the output
+shows warnings like `Refused login` or `skipped line 5`. That is expected; the last line must be `OK`.
+
 ---
 
 ## 2. Manual test on one computer

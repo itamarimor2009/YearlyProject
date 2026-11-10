@@ -2,6 +2,11 @@
 
 > This document describes **how the system works**. It is the technical basis of the project.
 > The phases, tasks and decisions are in [PLAN.md](PLAN.md).
+> To read the code itself (file by file, with a glossary), see [CODE_TOUR.md](CODE_TOUR.md).
+
+**Contents:** 1. The idea · 2. The big picture · 3. The three connections · 4. Components ·
+5. Request flows · 6. Protocol · 7. How the server decides · 8. Database · 9. The blocklist file ·
+10. Security · 11. Configuration · 12. Folder layout · 13. How the design grows · 14. Known limitations
 
 ---
 
@@ -69,7 +74,7 @@ flowchart LR
 flowchart TB
     subgraph CLIENT["Client app"]
         LP["LocalProxy<br/>listens on 127.0.0.1:8080<br/>one thread per browser connection"]
-        RQ["RequestParser<br/>reads CONNECT / GET line<br/>→ host + port"]
+        RQ["Request parsing<br/>reads CONNECT / GET line<br/>→ host + port"]
         FC["FilterClient<br/>one TLS connection to server<br/>check(host) → allow/block"]
         RL["Relay<br/>copies bytes browser ⇄ website"]
         BP["Block page"]
@@ -81,7 +86,7 @@ flowchart TB
     subgraph SERVER["Filter server"]
         TS["FilterServer<br/>listens on 0.0.0.0:9443<br/>one thread per client"]
         PR["Protocol<br/>hello / check / ping"]
-        AU["Auth<br/>checks client token"]
+        AU["Login check<br/>client_id + token"]
         PE["PolicyEngine<br/>check(host) → Decision"]
         RP["Repository (interface)<br/>SQLite implementation"]
         LG["AccessLogger"]
@@ -97,25 +102,25 @@ flowchart TB
 
 ### Client app
 
-| Part | Job |
-|---|---|
-| **LocalProxy** | Accepts connections from the browser on `127.0.0.1:8080`. Starts a thread for each one. |
-| **RequestParser** | Reads the first line the browser sends and gets the `host` and `port`. |
-| **FilterClient** | Keeps **one TLS connection** to the server. `check(host)` sends a question and **waits on the socket** for the answer. A lock makes sure only one question at a time travels on the socket. If the connection drops, it reconnects. |
-| **Relay** | When the site is allowed, opens connection C to the website and copies bytes in both directions until one side closes. |
-| **Block page** | When the site is blocked, sends the browser `403 Forbidden` (and an HTML page for `http://` sites). |
+| Part | Job | Where in the code |
+|---|---|---|
+| **LocalProxy** | Accepts connections from the browser on `127.0.0.1:8080`. Starts a thread for each one. | `client/local_proxy.py`, class `LocalProxy` |
+| **Request parsing** | Reads the first line the browser sends and gets the `host` and `port`. | `client/local_proxy.py`, functions `read_request_head()`, `parse_connect_target()`, `parse_http_url()` |
+| **FilterClient** | Keeps **one TLS connection** to the server. `check(host)` sends a question and **waits on the socket** for the answer. A lock makes sure only one question at a time travels on the socket. If the connection drops, it reconnects. | `client/filter_client.py`, class `FilterClient` |
+| **Relay** | When the site is allowed, copies bytes between the browser and the website (connection C) in both directions, until one side closes. | `client/relay.py`, function `relay()` |
+| **Block page** | When the site is blocked, sends the browser `403 Forbidden` (and an HTML page for `http://` sites). | `LocalProxy.send_page()` + `client/block_page.html` |
 
 ### Filter server
 
-| Part | Job |
-|---|---|
-| **FilterServer** | Accepts TLS connections from clients on port `9443`. One thread per client. (`server/tls_server.py`) |
-| **Protocol** | Reads and writes the JSON-line messages (see section 6). |
-| **Auth** | The first message must be `hello` with a valid client token, otherwise the connection is closed. |
-| **PolicyEngine** | Decides allow/block for a host (see section 7). Does **not** know about sockets or SQL. |
-| **Repository** | The only part that talks to the database. Defined as an interface, implemented with SQLite. |
-| **AccessLogger** | Writes one row per `check` into `access_log`. |
-| **Importer** | Loads `blacklist.txt` into the database. |
+| Part | Job | Where in the code |
+|---|---|---|
+| **FilterServer** | Accepts TLS connections from clients on port `9443`. One thread per client. | `server/tls_server.py`, class `FilterServer` |
+| **Protocol** | Reads and writes the JSON-line messages (see section 6). | `common/protocol.py` |
+| **Login check** | The first message must be `hello` with a valid `client_id` + token, otherwise the connection is closed. | `FilterServer.do_hello()` and `is_valid_client()` |
+| **PolicyEngine** | Decides allow/block for a host (see section 7). Does **not** know about sockets or SQL. | `server/policy.py` |
+| **Repository** | The only part that talks to the database. A base class lists the methods; the SQLite class writes them. | `server/storage/base.py`, `server/storage/sqlite_repo.py` |
+| **AccessLogger** | Writes one row per `check` into `access_log`. | `server/access_logger.py` |
+| **Importer** | Loads `blacklist.txt` into the database. | `server/importer.py` + `server/sources/` |
 
 **Layering rule:** sockets → protocol → policy → repository → database. Each layer only calls the one below it.
 This is what lets us add a dashboard or external blocklist sources later without changing the network code.
@@ -187,11 +192,17 @@ sequenceDiagram
     participant C as Client app
     participant S as Filter server
     B->>C: CONNECT www.ynet.com:443
-    C-xS: check www.ynet.com (no answer within 3 seconds)
+    C-xS: connect fails (refused, or no answer within 3 seconds)
     Note over C: Fail closed: when in doubt, block
     C-->>B: 503 "Filter server unavailable"
-    Note over C: Tries to reconnect in the background
+    Note over C: For the next 5 seconds, answers 503 at once (no new attempt)
+    B->>C: a later request (after the 5 seconds)
+    C->>S: tries to connect again. If it works, logs in and continues normally
 ```
+
+There is no background thread: the client tries to reconnect when the **next** request comes,
+but not more often than once every 5 seconds (`RETRY_WAIT_SECONDS` in `client/filter_client.py`),
+so the browser isn't kept waiting while the server is down.
 
 In **Phase 2** the client gets a small cache. When the server is unreachable, the client uses a cached answer
 if it has one, and blocks only sites it has never asked about.
@@ -240,12 +251,22 @@ flowchart LR
 | S → C | `pong` | `{"type":"pong","id":9}` |
 | S → C | `error` | `{"type":"error","id":7,"code":"bad_request","message":"…"}` |
 
-Error codes: `unauthorized`, `bad_request`, `too_long`, `unsupported_version`, `internal`.
+Error codes:
+
+| Code | When |
+|---|---|
+| `unauthorized` | The first message wasn't `hello`, or the `client_id`/token is wrong |
+| `bad_request` | Not valid JSON, no `type`, an unknown `type`, or a `check` with an invalid host name |
+| `too_long` | A line longer than 4096 bytes |
+| `unsupported_version` | The `hello` has a protocol version other than 1 |
+| `internal` | Reserved for a server-side failure (not used by the code yet) |
 
 Rules:
 1. The first message must be `hello`. Anything else → `error unauthorized` and disconnect.
-2. A bad `hello` → `error unauthorized` and disconnect (and a log line on the server).
-3. The server never sends a message the client did not ask for.
+2. A bad `hello` (wrong token, unknown client, missing fields) → `error unauthorized` and disconnect, plus a warning in the server log.
+3. A `hello` with another protocol version → `error unsupported_version` and disconnect.
+4. After login, an invalid host name in `check` → `error bad_request`; the connection stays open and the client treats it as **block**.
+5. The server never sends a message the client did not ask for.
 
 ---
 
@@ -330,7 +351,10 @@ instagram.com
 tiktok.com
 
 # Games
-example-games.com
+roblox.com
+
+# For testing (a plain http:// site, so you can see the block page)
+neverssl.com
 ```
 
 * One domain per line. `#` starts a comment. Empty lines are ignored.
@@ -351,7 +375,7 @@ example-games.com
 | The client is used as an open proxy by others | The client listens on `127.0.0.1` only. |
 | The client is used to reach non-web services | Connection C allows only ports 80 and 443. |
 | Bad or huge input | Max line length, JSON validation, host name validation, socket timeouts. |
-| Slow or too many connections (tying up the server) | A new client must finish TLS + login within **10 seconds**; at most **100** clients at the same time. |
+| Slow or too many connections (tying up the server) | A new client must finish TLS + login within **10 seconds**; a logged-in client that sends nothing for **10 minutes** is disconnected; at most **100** clients at the same time. |
 | Fake lines in the server log | Text from the client (like a wrong `client_id`) is logged with `repr()`, so new-line characters can't create fake log lines. |
 | SQL injection | `?` placeholders only. |
 | Private key leaks | `server.key` stays on the server machine, is never committed to git, and has file permissions 600. |
@@ -359,7 +383,7 @@ example-games.com
 Both sides ask for the **X25519** group explicitly (`common/tls_settings.py`). Without this, new OpenSSL
 versions pick a *hybrid* method (X25519 mixed with the post-quantum ML-KEM), which is harder to explain.
 
-How to show the Diffie-Hellman key exchange in the project presentation:
+How to show the Diffie-Hellman key exchange in a presentation:
 * the client and server print it when connecting, e.g. `TLSv1.3, key exchange x25519, cipher TLS_AES_256_GCM_SHA384`;
 * capture connection B in **Wireshark** and point to the `key_share` field in ClientHello/ServerHello
   (step-by-step guide, and a capture tool that needs no admin rights: [TESTING.md](TESTING.md), section 4).
@@ -405,9 +429,13 @@ Moving the server to the internet later means: new address in `client.json` + a 
 
 ```text
 YearlyProject/
+├── README.md                # start here: what it is, how to run it
 ├── docs/
 │   ├── ARCHITECTURE.md      ← this file
-│   └── PLAN.md
+│   ├── CODE_TOUR.md         # reading the code, file by file + glossary
+│   ├── TESTING.md           # tests, manual checklist, two computers, Wireshark
+│   ├── PLAN.md              # decisions and phases
+│   └── wireshark/           # a real recorded capture of connection B
 ├── run_server.py            # python run_server.py run | import | add-client | logs
 ├── run_client.py            # python run_client.py
 ├── common/                  # shared by client and server
@@ -442,7 +470,12 @@ YearlyProject/
 │   └── make_cert.sh
 ├── tools/
 │   └── capture_tap.py       # demo: record connection B into a Wireshark file
-└── tests/
+└── tests/                   # automatic tests (python -m unittest discover tests)
+    ├── test_domains.py      # site-name cleaning and parent domains
+    ├── test_protocol.py     # JSON-line messages
+    ├── test_policy.py       # blocklist + database + decisions
+    ├── test_proxy_parsing.py
+    └── test_end_to_end.py   # the whole system with a real TLS server
 ```
 
 Only the Python standard library is used: `socket`, `ssl`, `threading`, `select`, `sqlite3`, `json`, `hashlib`, `hmac`, `secrets`, `logging`.
